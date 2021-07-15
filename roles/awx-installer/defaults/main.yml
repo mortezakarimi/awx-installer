@@ -1,0 +1,5 @@
+---
+awx_operator_version: 0.12.0
+hostname: awx-demo.example.com
+NodePortIP: ""
+app_name: "awx-demo"

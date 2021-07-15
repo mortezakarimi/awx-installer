@@ -1,0 +1,20 @@
+---
+- hosts: all
+
+  pre_tasks:
+    - name: ensure sudo is installed
+      become: true
+      apt:
+        name: sudo
+      tags: ["config-server", "install-awx"]
+
+    - name: ensure user is present
+      become: true
+      user:
+        name: "{{ansible_env.LOGNAME}}"
+        append: yes
+        groups: sudo
+      tags: ["config-server", "install-awx"]
+
+  roles:
+    - role: awx-installer

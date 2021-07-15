@@ -1,0 +1,229 @@
+---
+- name: Install needed packages
+  become: true
+  apt:
+    name: "{{ packages }}"
+    state: present
+    update_cache: yes
+  vars:
+    packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+      - snapd
+      - python3-pip
+  tags: ["config-server", "install-awx"]
+
+- name: Install needed Python libraries.
+  become: true
+  pip:
+    name: [openshift, PyYAML, urllib3, chardet]
+    state: latest
+  tags: ["config-server", "install-awx"]
+
+- name: Install "core"
+  become: true
+  community.general.snap:
+    name: core
+  tags: ["config-server", "install-awx"]
+
+- name: Install "microk8s" with option --classic
+  become: true
+  community.general.snap:
+    name: microk8s
+    classic: yes
+  tags: ["install-microk8s", "install-awx"]
+
+- name: Adding user {{ ansible_user }}
+  become: true
+  user:
+    name: "{{ ansible_user }}"
+    append: yes
+    groups: microk8s
+  tags: ["install-microk8s", "install-awx"]
+
+- name: reset ssh connection to allow user changes to affect ansible user
+  meta: reset_connection
+  tags: ["install-microk8s", "install-awx"]
+
+- name: Change kubeconfig file permission
+  file:
+    path: $HOME/.kube
+    group: "{{ ansible_user }}"
+    recurse: yes
+  tags: ["install-microk8s", "install-awx"]
+
+- name: Wait for microk8s running success
+  shell:
+    cmd: /snap/bin/microk8s status --wait-ready
+  register: microk8sStatusResult
+  until: "'microk8s is running' in microk8sStatusResult.stdout"
+  retries: 50
+  delay: 30
+  tags: ["install-microk8s", "install-awx"]
+
+- name: Configure needed addons in microk8s
+  become: yes
+  shell:
+    cmd: "/snap/bin/microk8s enable {{item}}"
+  loop:
+    - storage
+    - dns
+  register: microk8sStatusResult
+  failed_when: >
+    ("'is enabled' not in microk8sStatusResult.stdout") and  ("'will be available soon' not in microk8sStatusResult.stdout") and ('is already enabled' not in microk8sStatusResult.stdout)
+  changed_when:
+    - "'is enabled' in microk8sStatusResult.stdout"
+    - "'will be available soon' in microk8sStatusResult.stdout"
+  ignore_errors: true
+  environment:
+    LC_ALL: en_US.utf-8
+    LANG: en_US.UTF-8
+  tags: ["enable-microk8s-addons", "install-awx"]
+
+- name: Debug Configure needed addons in microk8s failed
+  debug:
+    var: microk8sStatusResult
+  when: microk8sStatusResult is failed
+  tags: ["enable-microk8s-addons", "install-awx"]
+
+- name: Get kubectl stable version
+  uri:
+    url: https://dl.k8s.io/release/stable.txt
+    return_content: yes
+  register: kubectlVersion
+  when: kubectlVersion is not defined
+  tags: ["install-kubectl", "install-microk8s", "install-awx"]
+
+- name: Kubectl selected version
+  debug:
+    var: kubectlVersion
+  when: kubectlVersion is defined
+  tags: ["install-kubectl", "install-microk8s", "install-awx"]
+
+- name: Get kubectl stable version checksum
+  uri:
+    url: https://dl.k8s.io/{{ kubectlVersion.content }}/bin/linux/amd64/kubectl.sha256
+    return_content: yes
+  register: kubectlChecksum
+  when: kubectlChecksum is not defined
+  tags: ["install-kubectl", "install-microk8s", "install-awx"]
+
+- name: Download kubectl file
+  become: yes
+  get_url:
+    url: "https://dl.k8s.io/release/{{ kubectlVersion.content }}/bin/linux/amd64/kubectl"
+    checksum: "sha256:{{kubectlChecksum.content}}"
+    dest: /usr/local/bin/kubectl
+    group: root
+    mode: 0775
+    owner: root
+  register: kubectlVersion
+  when: (kubectlVersion is defined) and (kubectlChecksum is defined)
+  tags: ["install-kubectl", "install-microk8s", "install-awx"]
+
+- name: Config Kubectl to use Microk8s
+  become: yes
+  shell:
+    cmd: "/snap/bin/microk8s config"
+  register: microk8sConfig
+  tags: ["install-microk8s", "install-awx"]
+
+- name: Creating a config file in {{ansible_user_dir}}/.kube/config
+  become: yes
+  copy:
+    dest: "{{ansible_user_dir}}/.kube/config"
+    content: "{{ microk8sConfig.stdout }}"
+    mode: "0644"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  tags: ["install-microk8s", "install-awx"]
+
+- name: reset ssh connection to kubectl config load
+  meta: reset_connection
+  tags: ["install-microk8s", "install-awx"]
+
+- name: Create the AWX Operator for Kubernetes
+  k8s:
+    definition: "{{ item }}"
+    apply: yes
+    state: present
+    namespace: default
+    wait: yes
+  with_items: '{{ lookup("url", "https://raw.githubusercontent.com/ansible/awx-operator/{{ awx_operator_version }}/deploy/awx-operator.yaml", split_lines=False) | from_yaml_all | list }}'
+  when: item is not none
+  tags: ["active-awx-operator", "install-awx"]
+
+- name: Create the AWX for Kubernetes
+  k8s:
+    state: present
+    definition:
+      apiVersion: awx.ansible.com/v1beta1
+      kind: AWX
+      metadata:
+        name: "{{app_name}}"
+      spec:
+        service_type: NodePort
+        ingress_type: none
+        hostname: "{{ hostname }}"
+    apply: yes
+    namespace: default
+  tags: ["active-awx", "install-awx"]
+
+- name: Get an NodePort IP
+  shell:
+    cmd: kubectl get svc -l "app.kubernetes.io/managed-by=awx-operator,app.kubernetes.io/name={{app_name}}" -o jsonpath={.items[*].spec.clusterIP}
+
+  register: kubectl_nodeport_ip
+  until: kubectl_nodeport_ip.stdout != ""
+  retries: 50
+  delay: 30
+  tags: ["active-awx", "get-nodeport-ip", "install-awx"]
+
+- name: Set NodePort IP
+  set_fact:
+    NodePortIP: "{{kubectl_nodeport_ip.stdout}}"
+  tags: ["active-awx", "get-nodeport-ip", "install-awx"]
+
+- name: NodePortIP
+  debug:
+    var: NodePortIP
+  tags: ["active-awx", "get-nodeport-ip", "install-awx"]
+
+- name: Install nginx
+  become: yes
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+  tags: ["install-nginx", "install-awx"]
+
+- name: Copy new nginx configuration
+  become: yes
+  template:
+    src: default.j2
+    dest: "/etc/nginx/sites-available/default"
+    mode: 0644
+  when: NodePortIP != ""
+  tags: ["install-nginx", "config-nginx", "install-awx"]
+
+- name: enable and start nginx
+  become: yes
+  service:
+    name: nginx
+    enabled: yes
+    state: restarted
+  tags: ["install-nginx", "start_nginx", "install-awx"]
+
+- name: Get Admin password
+  shell:
+    cmd: kubectl get secret {{app_name}}-admin-password -o jsonpath="{.data.password}" | base64 --decode
+  register: adminPassword
+  tags: ["get-admin-password", "install-awx"]
+
+- name: Get Admin password
+  debug:
+    var: adminPassword.stdout
+  tags: ["get-admin-password", "install-awx"]

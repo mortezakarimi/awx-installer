@@ -1,0 +1,3 @@
+inventory/*
+!.gitignore
+.idea
