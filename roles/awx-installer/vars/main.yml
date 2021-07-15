@@ -1,3 +1,0 @@
-tomcat_url: "https://ftp.wayne.edu/apache/tomcat/tomcat-9/v9.0.41/bin/apache-tomcat-9.0.41.tar.gz"
-tomcat_path: "/opt/apache-tomcat-9.0.41"
-tomcat_port: "80"
