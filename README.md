@@ -19,7 +19,7 @@ Create a host file configuration for your hosts do you want to manage inspired b
 all:
   hosts:
   children:
-    musicPlatform:
+    AwxServers:
       hosts:
         awx-demo.example.com:
           ansible_connection: ssh
